@@ -1,5 +1,5 @@
-import asyncio
-import re,random,time,hashlib,uuid
+import asyncio,psutil,os
+import re,random,time,hashlib,uuid,json
 from datetime import datetime, timedelta
 from sys import stderr, stdout
 from threading import Timer
@@ -7,7 +7,7 @@ from threading import Timer
 from pyrogram import Client
 from pyrogram.enums import MessageMediaType,ChatType,ParseMode
 from pyrogram.errors import FileReferenceExpired,FloodWait,AuthBytesInvalid
-from pyrogram.types import InputMediaPhoto, InputMediaVideo, InputMediaAudio, InputMediaDocument, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.types import InputMediaPhoto, InputMediaVideo, InputMediaAudio, InputMediaDocument, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton, ReplyParameters
 from pyrogram.client import Cache
 from pyrogram import filters
 import mysql.connector
@@ -21,17 +21,17 @@ uvloop.install()
 api_id = 00000000
 api_hash = "00000000000000000000000000000"
 bot_token = "000000000:000000000000000000000000000"
+admin = 112233333
 app = Client("mlkauto", api_id=api_id, api_hash=api_hash,bot_token=bot_token, max_concurrent_transmissions = 1, sleep_threshold = 60)
 
 app.message_cache = Cache(1000000)
 dl_types = [MessageMediaType.PHOTO, MessageMediaType.VIDEO, MessageMediaType.AUDIO, MessageMediaType.DOCUMENT]
-groups = [-1001234567890, {}, {}]
 use_record = {}
 
 dbconfig = {
     "host": "127.0.0.1",
     "user": "mlkauto",
-    "password": "000000000000",
+    "password": "mlkauto",
     "database": "mlbot"
 }
 
@@ -40,6 +40,7 @@ connection_pool = pooling.MySQLConnectionPool(pool_name="mypool",pool_size=5,**d
 processed_media_groups = {}
 expiration_time = 1800
 decode_users = {}
+join_users = {}
 
 ret_task_count = 0
 stor_task_count = 0
@@ -52,6 +53,13 @@ def cleanup_processed_media_groups():
     expired_keys = [key for key, timestamp in processed_media_groups.items() if current_time - timestamp > expiration_time]
     for key in expired_keys:
         del processed_media_groups[key]
+
+# Function to clean expired join_users
+def clean_expired_join_users():
+    current_time = time.time()
+    expired_keys = [key for key, timestamp in join_users.items() if current_time - timestamp > 900]
+    for key in expired_keys:
+        del join_users[key]
 
 def decode_rate_con(uid, p = 0):
     if not uid in decode_users:
@@ -69,12 +77,12 @@ def decode_rate_con(uid, p = 0):
     decode_users[uid] = time.time() + cooldown_time
     return 0
 
-def write_rec(mlk, mkey, skey, owner, desta, mgroup_id = ""):
+def write_rec(mlk, mkey, skey, owner, desta, file_ids, mgroup_id = ""):
     try:
         conn = connection_pool.get_connection()
         cursor = conn.cursor(dictionary=True)
-        sql = 'INSERT INTO records (mlk, mkey, skey, owner, mgroup_id, desta ) VALUES (%s, %s, %s, %s, %s, %s)'
-        cursor.execute(sql, (mlk, mkey, skey, owner, mgroup_id, desta))
+        sql = 'INSERT INTO records (mlk, mkey, skey, owner, mgroup_id, desta, file_ids ) VALUES (%s, %s, %s, %s, %s, %s, %s)'
+        cursor.execute(sql, (mlk, mkey, skey, owner, mgroup_id, desta, file_ids))
         conn.commit()
     except Exception as e:
         print(f"Error: {e}")
@@ -82,6 +90,19 @@ def write_rec(mlk, mkey, skey, owner, desta, mgroup_id = ""):
         cursor.close()
         conn.close()
     
+def write_rec_fileids(file_ids, mlk):
+    try:
+        conn = connection_pool.get_connection()
+        cursor = conn.cursor(dictionary=True)
+        sql = 'UPDATE records SET file_ids = %s WHERE mlk = %s'
+        cursor.execute(sql, (file_ids, mlk))
+        conn.commit()
+    except Exception as e:
+        print(f"Error: {e}")
+    finally:
+        cursor.close()
+        conn.close()   
+
 def read_rec(mlk):
     try:
         conn = connection_pool.get_connection()
@@ -103,6 +124,21 @@ def read_rec(mlk):
         cursor.close()
         conn.close()
         return False
+
+def read_null_fileids():
+    try:
+        conn = connection_pool.get_connection()
+        cursor = conn.cursor(dictionary=True)
+        sql = 'SELECT * FROM records WHERE file_ids is NULL'
+        cursor.execute(sql)
+        result = cursor.fetchall()
+        conn.commit()
+    except Exception as e:
+        print(f"Error: {e}")
+    finally:
+        cursor.close()
+        conn.close()
+        return result
 
 def rotate_mkey(mlk):
     try:
@@ -227,6 +263,62 @@ def set_expire(mlk, exp_time):
         cursor.close()
         conn.close()
 
+def write_joins(uid, files):
+    try:
+        conn = connection_pool.get_connection()
+        cursor = conn.cursor(dictionary=True)
+        sql = 'SELECT * FROM join_list WHERE uid = %s'
+        cursor.execute(sql, (uid, ))
+        result = cursor.fetchone()
+        conn.commit()
+    except Exception as e:
+        print(f"Error: {e}")
+    if result:
+        if time.time() - result["create_time"].timestamp() <= 900:
+            files = json.loads(result["file_ids"]) + files
+            create_time = result["create_time"]
+        else:
+            create_time = datetime.strftime(datetime.now(), "%Y-%m-%d %H:%M:%S")
+        if len(files) > 60:
+            files = files[0:60]
+        try:
+            sql = 'UPDATE join_list SET file_ids = %s, create_time = %s WHERE uid = %s'
+            cursor.execute(sql, (json.dumps(files), create_time, uid))
+            conn.commit()
+        except Exception as e:
+            print(f"Error: {e}")
+    else:
+        try:
+            sql = 'INSERT INTO join_list (uid, file_ids, create_time) VALUES (%s, %s, %s)'
+            cursor.execute(sql, (uid, json.dumps(files), datetime.strftime(datetime.now(), "%Y-%m-%d %H:%M:%S")))
+            conn.commit()
+        except Exception as e:
+            print(f"Error: {e}")
+    cursor.close()
+    conn.close()
+    return len(files)
+
+def read_joins(uid, delete = False):
+    try:
+        conn = connection_pool.get_connection()
+        cursor = conn.cursor(dictionary=True)
+        sql = 'SELECT * FROM join_list WHERE uid = %s'
+        cursor.execute(sql, (uid,))
+        result = cursor.fetchone()
+        conn.commit()
+        if delete:
+            sql = 'DELETE FROM join_list WHERE uid = %s'
+            cursor.execute(sql, (uid,))
+            conn.commit()
+    except Exception as e:
+        print(f"Error: {e}")
+    cursor.close()
+    conn.close()
+    if result and len(result) > 0:
+        return json.loads(result["file_ids"])
+    else:
+        return False
+
 def mediatotype(obj):
     if obj == MessageMediaType.PHOTO:
         return "photo"
@@ -236,41 +328,56 @@ def mediatotype(obj):
         return "audio"
     if obj == MessageMediaType.DOCUMENT:
         return "document"
+    return False
+
+def size_to_str(size):
+    if size < 1024:
+        return f"{size} B"
+    elif size < 1024 * 1024:
+        return f"{size / 1024:.2f} KB"
+    elif size < 1024 * 1024 * 1024:
+        return f"{size / (1024 * 1024):.2f} MB"
+    else:
+        return f"{size / (1024 * 1024 * 1024):.2f} GB"
+    
+def duration_to_str(duration):
+    if duration < 60:
+        return f"{round(duration,1)}秒"
+    elif duration < 3600:
+        return f"{duration / 60:.2f}分钟"
+    else:
+        return f"{duration / 3600:.2f}小时"
 
 async def media_to_link(mlk, mkey, skey, chat_id, msg_id, owner, mgroup_id, stor_sem, retry = 0):
     async with stor_sem:
         global stor_task_count
-        await asyncio.sleep(random.randint(10,35) / 10)
-        if len(mgroup_id) == 0:
-            try:
-                dup_message = await app.copy_message(chat_id = groups[0], from_chat_id = chat_id, message_id = msg_id)
-            except FloodWait as e:
-                print(e)
-                await asyncio.sleep(e.value + 3)
-                dup_message = await app.copy_message(chat_id = groups[0], from_chat_id = chat_id, message_id = msg_id)
-            except Exception as e:
-                print(e)
-                await asyncio.sleep(1 + random.randint(18,35) / 10)
-        else:
-            try:
-                dup_message = await app.copy_media_group(chat_id = groups[0], from_chat_id = chat_id, message_id = msg_id)
-            except FloodWait as e:
-                print(e)
-                await asyncio.sleep(e.value + 3)
-                dup_message = await app.copy_media_group(chat_id = groups[0], from_chat_id = chat_id, message_id = msg_id)
-            except Exception as e:
-                print(e)
-                await asyncio.sleep(1 + random.randint(18,35) / 10)
-            dup_message = dup_message[0]
-        if (not dup_message.id):
-            if (retry > 3):
-                stor_task_count -=1 if stor_task_count > 0 else 0
-                return
-            await asyncio.sleep(ret_task_count*1.33 + 1)
-            retry += 1
-            return media_to_link(mlk, mkey, skey, chat_id, msg_id, owner, mgroup_id, stor_sem, retry)
-        write_rec(mlk, mkey, skey, owner, dup_message.id, mgroup_id)
-        keyout = '<点击链接直接复制，无需手选>\n\n<b>主分享KEY</b>: `https://t.me/mlkautobot?start=' + mlk + '-' + mkey + '`\n<b>一次性KEY</b>: `https://t.me/mlkautobot?start=' + mlk + '-' + skey + '`' + '\n\n主分享KEY可重复使用，一次性KEY在获取一次后会失效，如果你是资源上传者，可以向机器人发送主分享KEY来获取最新可用的一次性KEY\n\n🔽链接默认不过期，如需限时有效下方可设置'
+        files = await read_media([msg_id], chat_id)
+        pcount = 0
+        vcount = 0
+        dcount = 0
+        acount = 0
+        dura = 0
+        size = 0
+        summary = ""
+        for file in files:
+            if (file["type"] == "photo"):
+                pcount += 1
+            if (file["type"] == "video"):
+                vcount += 1
+                dura += file["duration"]
+            if (file["type"] == "document"):
+                dcount += 1
+            if (file["type"] == "audio"):
+                acount += 1
+            size += file["size"]
+        summary += str(pcount)+"p" if pcount > 0 else ""
+        summary += str(vcount)+"v" if vcount > 0 else ""
+        summary += str(dcount)+"d" if dcount > 0 else ""
+        summary += str(acount)+"a" if acount > 0 else " "
+        summary += duration_to_str(dura)+" " if dura > 0 else " "
+        summary += size_to_str(size) if size > 0 else ""
+        write_rec(mlk, mkey, skey, owner, 0, json.dumps(files), mgroup_id)
+        keyout = '<b>主分享KEY点击复制</b>: `https://t.me/mlkautobot?start=' + mlk + '-' + mkey + '  ' + summary + "`" + '\n<b>一次性KEY点击复制</b>: `https://t.me/mlkautobot?start=' + mlk + '-' + skey + '`' + '\n\n主分享KEY可重复使用，一次性KEY在获取一次后会失效，如果你是资源上传者，可以向机器人发送主分享KEY来获取最新可用的一次性KEY\n\n🔽链接默认*不过期*，如需限时有效下方可设置'
         acts = InlineKeyboardMarkup([[
             InlineKeyboardButton("1H过期", callback_data=mlk + "?exp=1H"),
             InlineKeyboardButton("3H过期", callback_data=mlk + "?exp=3H"),
@@ -278,7 +385,7 @@ async def media_to_link(mlk, mkey, skey, chat_id, msg_id, owner, mgroup_id, stor
             InlineKeyboardButton("不过期", callback_data=mlk + "?exp=NULL"),
         ]])
         try:
-            await app.send_message(chat_id, text = keyout, reply_to_message_id = msg_id, reply_markup = acts)
+            await app.send_message(chat_id, text = keyout, reply_parameters = ReplyParameters(message_id = msg_id, chat_id = chat_id), reply_markup = acts)
         except Exception as e:
             print(e)
         finally:
@@ -304,22 +411,46 @@ async def media_prep(chat_id, msg_id, owner, msg_dt, mgroup_id = ""):
     stor_task_count += 1
     await asyncio.gather(*copy_task)
 
-async def link_to_media(chat_id, msg_id, desta, mgroup_id, ret_sem):
+async def link_to_media(chat_id, msg_id, data_set, mgroup_id, ret_sem):
     async with ret_sem:
+        files = json.loads(data_set['file_ids'])
+        reply_obj = ReplyParameters(message_id = msg_id, chat_id = chat_id)
+        if len(files) == 0:
+            return
         if (mgroup_id):
+            file_list = []
+            for file in files:
+                if file["type"] == "photo":
+                    file_list.append(InputMediaPhoto(file["file_id"]))
+                if file["type"] == "video":
+                    file_list.append(InputMediaVideo(file["file_id"], file["thumb"]))
+                if file["type"] == "audio":
+                    file_list.append(InputMediaAudio(file["file_id"]))
+                if file["type"] == "document":
+                    file_list.append(InputMediaDocument(file["file_id"]))
             try:
-                await app.copy_media_group(chat_id, from_chat_id = groups[0], message_id = desta, reply_to_message_id = msg_id)
+                #await app.copy_media_group(chat_id, from_chat_id = groups[0], message_id = desta, reply_to_message_id = msg_id)
+                await app.send_media_group(chat_id, file_list, reply_parameters = reply_obj)
             except FloodWait as e:
                 await asyncio.sleep(e.value)
-                await app.copy_media_group(chat_id, from_chat_id = groups[0], message_id = desta, reply_to_message_id = msg_id)
+                #await app.copy_media_group(chat_id, from_chat_id = groups[0], message_id = desta, reply_to_message_id = msg_id)
             except Exception as e:
                 print(e)
         else:
+            file_list = files[0]
             try:
-                await app.copy_message(chat_id, from_chat_id = groups[0], message_id = desta)
+                #await app.copy_message(chat_id, from_chat_id = groups[0], message_id = desta)
+                if file_list["type"] == "photo":
+                    await app.send_photo(chat_id, file_list["file_id"], reply_parameters = reply_obj)
+                if file_list["type"] == "video":
+                    await app.send_video(chat_id, file_list["file_id"], reply_parameters = reply_obj, thumb = file_list["thumb"])
+                if file_list["type"] == "audio":
+                    await app.send_audio(chat_id, file_list["file_id"], reply_parameters = reply_obj)
+                if file_list["type"] == "document":
+                    await app.send_document(chat_id, file_list["file_id"], reply_parameters = reply_obj)
             except FloodWait as e:
                 await asyncio.sleep(e.value)
-                await app.copy_message(chat_id, from_chat_id = groups[0], message_id = desta)
+                #await app.copy_message(chat_id, from_chat_id = groups[0], message_id = desta)
             except Exception as e:
                 print(e)
         await asyncio.sleep(1 + random.randint(28,35) / 10)
@@ -341,11 +472,12 @@ async def link_prep(chat_id, msg_id, from_id, result, join_op = 0):
                 except Exception:
                     pass
                 return
-            desta = data_set['desta']
+            #desta = data_set['desta']
             mgroup_id = data_set['mgroup_id']
             if rkey == data_set["mkey"]:
                 if join_op:
-                    join_list.append(desta)
+                    for ids in json.loads(data_set["file_ids"]):
+                        join_list.append(ids)
                     continue
                 #return media and current skey
                 if data_set['pack_id']:
@@ -356,13 +488,13 @@ async def link_prep(chat_id, msg_id, from_id, result, join_op = 0):
                         return
                     pack_list = []
                     for set in full_set:
-                        task = asyncio.create_task(link_to_media(chat_id, msg_id, set['desta'], set['mgroup_id'], ret_sem))
+                        task = asyncio.create_task(link_to_media(chat_id, msg_id, set, set['mgroup_id'], ret_sem))
                         await asyncio.sleep(0.5 + 1.33 * ret_task_count + 1.5 * len(full_set))
                         ret_task_count += 1
                         ret_task.append(task)
                     await asyncio.gather(*ret_task)
                     return
-                task = asyncio.create_task(link_to_media(chat_id, msg_id, desta, mgroup_id, ret_sem))
+                task = asyncio.create_task(link_to_media(chat_id, msg_id, data_set, mgroup_id, ret_sem))
                 ret_task.append(task)
                 if ret_task_count >= 5:
                     try:
@@ -375,14 +507,14 @@ async def link_prep(chat_id, msg_id, from_id, result, join_op = 0):
                     #return skey
                     skey_disp = '本资源当前一次性KEY: `https://t.me/mlkautobot?start=' + data_set['mlk'] + '-' + data_set['skey'] + '`'
                     try:
-                        await app.send_message(chat_id, text = skey_disp, reply_to_message_id = msg_id)
+                        await app.send_message(chat_id, text = skey_disp, reply_parameters = ReplyParameters(message_id = msg_id, chat_id = chat_id))
                     except Exception:
                         return
                 continue
             if rkey == data_set["skey"]:
                 #return media and rotate skey
                 rotate_skey(mkey)
-                task = asyncio.create_task(link_to_media(chat_id, msg_id, desta, mgroup_id, ret_sem))
+                task = asyncio.create_task(link_to_media(chat_id, msg_id, data_set, mgroup_id, ret_sem))
                 ret_task.append(task)
                 if ret_task_count >= 5:
                     try:
@@ -398,36 +530,37 @@ async def link_prep(chat_id, msg_id, from_id, result, join_op = 0):
                 continue
             if rkey != data_set["mkey"] and rkey != data_set["skey"]:
                 try:
-                    await app.send_message(chat_id, text = "资源索引有效，但密钥不正确，一分钟后可以再试", reply_to_message_id = msg_id)
+                    await app.send_message(chat_id, text = "资源索引有效，但密钥不正确，一分钟后可以再试", reply_parameters = ReplyParameters(message_id = msg_id, chat_id = chat_id))
                 except Exception:
                     return
             decode_rate_con(from_id, p = 48)
     return join_list
 
-async def read_media(ids):
+async def read_media(ids, chat_id = groups[0]):
     media_cl = []
     if not ids:
         return
     for i in ids:
         try:
-            msg = await app.get_messages(groups[0], i)
-            await asyncio.sleep(1.25)
+            msg = await app.get_messages(chat_id, i)
         except FloodWait as e:
             print(e)
             await asyncio.sleep(e.value + 3)
         except Exception as e:
             print(e)
             await asyncio.sleep(1)
-            msg = await app.get_messages(groups[0], i)
+            msg = await app.get_messages(chat_id, i)
         #print(msg)
         if msg.media_group_id:
-            msgs = await app.get_media_group(groups[0], i)
+            msgs = await app.get_media_group(chat_id, i)
             for ix in msgs:
                 type = mediatotype(ix.media)
-                media_cl.append({"type": type, "file_id": getattr(ix, type).file_id, "thumb": ix.video.thumbs[0].file_id if type == "video" else ""})
+                if type:
+                    media_cl.append({"type": type, "file_id": getattr(ix, type).file_id, "size": getattr(ix, type).file_size, "thumb": ix.video.thumbs[0].file_id if (type == "video" and ix.video.thumbs) else "", "duration": ix.video.duration if type == "video" else ""})
         else:
                 type = mediatotype(msg.media)
-                media_cl.append({"type": type, "file_id": getattr(msg, type).file_id, "thumb": msg.video.thumbs[0].file_id if type == "video" else ""})
+                if type:
+                    media_cl.append({"type": type, "file_id": getattr(msg, type).file_id, "size": getattr(msg, type).file_size, "thumb": msg.video.thumbs[0].file_id if (type == "video" and msg.video.thumbs) else "", "duration": msg.video.duration if type == "video" else ""})
     return media_cl
 
 async def join_process(file_list, chat_id, hint = False):
@@ -447,7 +580,8 @@ async def join_process(file_list, chat_id, hint = False):
             try:
                 msg = await app.send_media_group(chat_id, file_list)
                 await media_prep(chat_id, msg[0].id, 0, msg[0].date, str(msg[0].media_group_id))
-            except Exception:
+            except Exception as e:
+                print(e)
                 await app.send_message(chat_id, text = "暂不支持文档和图片进行组包")
             finally:
                 return
@@ -457,7 +591,11 @@ async def join_process(file_list, chat_id, hint = False):
                 await app.send_message(chat_id, text = "媒体总数超过10个，将以10个一组返回，请耐心等待")
             except Exception:
                 return
-        msg = await app.send_media_group(chat_id, file_list[0:10])
+        try:
+            msg = await app.send_media_group(chat_id, file_list[0:10])
+        except Exception as e:
+            print(e)
+            return
         await asyncio.sleep(1.2)
         await media_prep(chat_id, msg[0].id, 0, msg[0].date, str(msg[0].media_group_id))
         await asyncio.sleep(2 + random.randint(15,45) / 10)
@@ -544,7 +682,7 @@ async def cmd_main(client, message):
 
 🔑 对于同一用户，链接转媒体的冷却时间为12秒，每条消息最多提交三个链接进行解析，超出部分会被忽略
 
-📦如需将多个媒体组包成一个，可以使用 <pre>/join 链接1 链接2 链接3</pre> 命令来操作，支持最多10个链接。举例：你分三次向机器人发送了2+1+3个媒体，使用组包功能可以将6个媒体集合成一条消息。TG允许一条消息包含最多10个媒体，如果组包后超过10个，会以每10个一组返回。
+📦如需将多个媒体组包成一个，可以使用 <pre>/joina</pre> 命令来操作。发送该命令后可以多次发送最多60个媒体，完成时点击“已发完”即可。举例：你分三次向机器人发送了2+1+3个媒体，使用组包功能可以将6个媒体集合成一条消息。TG允许一条消息包含最多10个媒体，如果组包后超过10个，会以每10个一组返回。
 
 🧰如需将多个资源归总到一个文件夹，可以使用 `/pack` 命令来操作。资源上传者向任意一条含KEY的消息回复 <pre> /pack </pre>，会得到一个随机生成的文件夹ID（例如114514），向其他含KEY的消息回复 <pre> /pack 114514 </pre> 可以将这条资源也加入到 114514 文件夹中。
 
@@ -558,10 +696,19 @@ async def cmd_main(client, message):
     except Exception:
         return
 
-@app.on_message(filters.command("lsa") & filters.private)
-async def cmd_main(client, message):
-     m = await app.get_media_group(groups[0], 1520)
-     print(m)
+@app.on_message(filters.command("joina") & filters.private)
+async def pre_join(client, message):
+    uid = message.from_user.id if message.from_user.id else 0
+    if uid == 0:
+        return
+    clean_expired_join_users()
+    if uid not in join_users:
+        join_users[uid] = time.time()
+        try:
+            await app.send_message(uid, text = "*请在15分钟内发送完所有需要组包的媒体*\n注意[图片photo、视频video]和[文档file/document]不能混合组包")
+        except Exception as e:
+            print(f"Error: {e}")
+            return
 
 @app.on_message(filters.command("join") & filters.private)
 async def join_media(client, message):
@@ -576,13 +723,14 @@ async def join_media(client, message):
     result = re.findall(r'\w{48}-\w{8}', join_text)
     if not result:
         return
-    if len(result) < 2 or len(result) > 10:
+    if len(result) < 2 or len(result) > 20:
         try:
-            await app.send_message(chat_id = message.chat.id, text = "媒体组包功能需要2-10个分享链接，不可小于2或大于10")
+            await app.send_message(chat_id = message.chat.id, text = "媒体组包功能需要2-20个分享链接，不可小于2或大于20")
         except Exception:
             return
-    ids = await link_prep(chat_id, 0, 0, result, join_op=1)
-    files = await read_media(ids)
+    files = await link_prep(chat_id, 0, 0, result, join_op=1)
+    if not files:
+        return
     #print(files)
     file_list = []
     for file in files:
@@ -596,7 +744,7 @@ async def join_media(client, message):
             file_list.append(InputMediaDocument(file["file_id"]))
     decode_rate_con(message.from_user.id, p = 18)
     await join_process(file_list, chat_id)
-
+    #await app.send_media_group(chat_id, file_list)
 
 @app.on_message(filters.command("s") & filters.private)
 async def cmd_main(client, message):
@@ -624,10 +772,9 @@ async def cmd_main(client, message):
             except Exception:
                 return
 
-@app.on_message(filters.media_group & filters.private & ~filters.reply)
-async def media_main(client, message):
-    if len(processed_media_groups) >= 100:
-        cleanup_processed_media_groups()
+@app.on_message(filters.media_group & filters.private & ~filters.reply & ~filters.sticker)
+async def media_maing(client, message):
+    cleanup_processed_media_groups()
     if (message.from_user and message.from_user.id):
         owner = message.from_user.id
     else:
@@ -640,10 +787,33 @@ async def media_main(client, message):
         return
     #send to storage func
     processed_media_groups[mgroup_id] = time.time()
+    #copy and return the message
+    try:
+        await app.copy_media_group(owner, chat_id, msg_id)
+    except Exception as e:
+        print(e)
+        return
+    if owner in join_users:
+        files = await read_media([msg_id], chat_id)
+        if files and len(files) > 0:
+            join_length = write_joins(owner, files)
+        if join_length >= 50:
+            content = "请注意单次组包最多60个媒体，当前已暂存" + str(join_length) + "个，超出60个的部分会被忽略"
+        else:
+            content = "当前已暂存" + str(join_length) + "个媒体，可继续发送或点击完成"
+        act = InlineKeyboardMarkup([[
+            InlineKeyboardButton("已传完，开始组包", callback_data=str(owner)+"?join=DONE")
+        ]])
+        try:
+            await app.send_message(chat_id, text = content, reply_markup = act)
+        except Exception as e:
+            print(e)
+        finally:
+            return
     await media_prep(chat_id, msg_id, owner, msg_dt, mgroup_id)
 
-@app.on_message(filters.media & filters.private & ~filters.reply)
-async def media_main(client, message):
+@app.on_message( (filters.audio | filters.document | filters.photo | filters.video) & filters.private & ~filters.reply)
+async def media_mains(client, message):
     if (message.media_group_id):
         return
     if (message.from_user and message.from_user.id):
@@ -653,6 +823,28 @@ async def media_main(client, message):
     msg_id = message.id
     chat_id = message.chat.id
     msg_dt = message.date
+    try:
+        await app.copy_message(owner, chat_id, msg_id)
+    except Exception as e:
+        print(e)
+        return
+    if owner in join_users:
+        files = await read_media([msg_id], chat_id)
+        if files and len(files) > 0:
+            join_length = write_joins(owner, files)
+        if join_length >= 50:
+            content = "请注意单次组包最多60个媒体，当前已暂存" + str(join_length) + "个，超出60个的部分会被忽略"
+        else:
+            content = "当前已暂存" + str(join_length) + "个媒体，可继续发送或点击完成"
+        act = InlineKeyboardMarkup([[
+            InlineKeyboardButton("已传完，开始组包", callback_data=str(owner)+"?join=DONE")
+        ]])
+        try:
+            await app.send_message(chat_id, text = content, reply_markup = act)
+        except Exception as e:
+            print(e)
+        finally:
+            return
     #send to storage func
     await media_prep(chat_id, msg_id, owner, msg_dt)
 
@@ -812,44 +1004,86 @@ async def top_rank(client, message):
 
 @app.on_callback_query()
 async def queue_ans(client, callback_query):
-    try:
-        mlk = callback_query.data.split("?")[0]
-        cmd = callback_query.data.split("?")[-1].split("=")[0]
-        op = callback_query.data.split("?")[-1].split("=")[-1]
-        chat_id = callback_query.message.chat.id
-        owner = callback_query.from_user.id
-    except Exception:
+    if not callback_query.data.split("?")[0] or not callback_query.data.split("?")[1]:
         return
-    if mlk and len(mlk) == 48:
-        data_set = read_rec(mlk)
-    if data_set['owner'] != owner:
+    cmd = callback_query.data.split("?")[1].split("=")[0]
+    op = callback_query.data.split("?")[1].split("=")[-1]
+    chat_id = callback_query.message.chat.id
+    owner = callback_query.from_user.id
+    if len(callback_query.data.split("?")[0]) == 48:
         try:
-            await app.send_message(chat_id, text = "你不是资源上传者，无权操作")
+            mlk = callback_query.data.split("?")[0]
         except Exception:
             return
-    if cmd == "exp":
-        cdt = math.ceil(decode_rate_con(callback_query.message.from_user.id))
-        if cdt:
+        data_set = read_rec(mlk)
+        if data_set['owner'] != owner:
             try:
-                await app.send_message(chat_id, text = "每12秒最多提交一次请求，请稍后再试")
+                await app.send_message(chat_id, text = "你不是资源上传者，无权操作")
             except Exception:
                 return
-        if op == "1H":
-            exp = datetime.now() + timedelta(hours=1)
-        if op == "3H":
-            exp = datetime.now() + timedelta(hours=3)
-        if op == "24H":
-            exp = datetime.now() + timedelta(days=1)
-        if op == "NULL":
-            exp = datetime.now() + timedelta(weeks=300)
-        exp = datetime.strftime(exp, "%Y-%m-%d %H:%M:%S")
-        try:
-            set_expire(mlk, exp)
-            await app.send_message(chat_id, text = "过期时间已设定为：" + exp)
+        if cmd == "exp":
+            cdt = math.ceil(decode_rate_con(callback_query.message.from_user.id))
+            if cdt:
+                try:
+                    await app.send_message(chat_id, text = "每12秒最多提交一次请求，请稍后再试")
+                except Exception:
+                    return
+            if op == "1H":
+                exp = datetime.now() + timedelta(hours=1)
+            if op == "3H":
+                exp = datetime.now() + timedelta(hours=3)
+            if op == "24H":
+                exp = datetime.now() + timedelta(days=1)
+            if op == "NULL":
+                exp = datetime.now() + timedelta(weeks=300)
+            exp = datetime.strftime(exp, "%Y-%m-%d %H:%M:%S")
+            try:
+                set_expire(mlk, exp)
+                await app.send_message(chat_id, text = "过期时间已设定为：" + exp)
+                await app.send_message(chat_id, text = "点击可直接复制：`https://t.me/mlkautobot?start=" + mlk + "-" + data_set['mkey'] + '  限时分享：' + exp + "`")
+                return
+            except Exception:
+                return
+    if cmd == "join":
+        if op == "DONE":
+            if owner in join_users:
+                del join_users[owner]
+            files = read_joins(owner, delete = True)
+            if files:
+                file_list = []
+                for file in files:
+                    if file["type"] == "video":
+                        file_list.append(InputMediaVideo(file["file_id"], file["thumb"]))
+                    if file["type"] == "photo":
+                        file_list.append(InputMediaPhoto(file["file_id"]))
+                    if file["type"] == "audio":
+                        file_list.append(InputMediaAudio(file["file_id"]))
+                    if file["type"] == "document":
+                        file_list.append(InputMediaDocument(file["file_id"]))
+                await join_process(file_list, chat_id)
             return
-        except Exception:
-            return
-        
+
+@app.on_message(filters.command("status"))
+async def stat_report(client, message):
+    if message.from_user.id and message.from_user.id == admin:
+        content = datetime.strftime(datetime.now(), "%Y-%m-%d %H:%M:%S") + " stat report:\n"
+        content += "memory_usage: " + str(round(psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024,2)) + " MB\n"
+        content += "processed_media_groups: " + str(len(processed_media_groups)) + "\n"
+        content += "decode_users: " + str(len(decode_users)) + "\n"
+        content += "ret_task_count: " + str(ret_task_count) + "\n"
+        content += "stor_task_count: " + str(stor_task_count) + "\n"
+        content += "join_users: " + str(len(join_users)) + "\n"
+    await app.send_message(message.chat.id, text = content)
+
+@app.on_message(filters.private & filters.command("ckfileids"))
+async def check_fileids(client, message):
+    data_set = read_null_fileids()
+    if data_set:
+        for file in data_set:
+            fileids = await read_media([file['desta']], groups[0])
+            write_rec_fileids(json.dumps(fileids), file['mlk'])
+            await asyncio.sleep(4)
+
 @app.on_message(filters.text & filters.private)
 async def ret_main(client, message):
     await pre_command(message)

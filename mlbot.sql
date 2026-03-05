@@ -3,7 +3,7 @@
 -- https://www.phpmyadmin.net/
 --
 -- 主机： localhost
--- 生成日期： 2024-11-30 18:04:20
+-- 生成日期： 2026-03-05 17:54:24
 -- 服务器版本： 8.0.37
 -- PHP 版本： 8.2.23
 
@@ -24,6 +24,18 @@ SET time_zone = "+00:00";
 -- --------------------------------------------------------
 
 --
+-- 表的结构 `join_list`
+--
+
+CREATE TABLE `join_list` (
+  `uid` bigint NOT NULL,
+  `file_ids` varchar(16000) COLLATE utf8mb4_general_ci NOT NULL,
+  `create_time` datetime NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+-- --------------------------------------------------------
+
+--
 -- 表的结构 `records`
 --
 
@@ -38,6 +50,7 @@ CREATE TABLE `records` (
   `desta` int NOT NULL,
   `destb` int DEFAULT NULL,
   `destc` int DEFAULT NULL,
+  `file_ids` varchar(10000) COLLATE utf8mb4_general_ci DEFAULT NULL,
   `name` text COLLATE utf8mb4_general_ci,
   `views` int NOT NULL DEFAULT '0',
   `exp` datetime DEFAULT NULL
@@ -46,6 +59,12 @@ CREATE TABLE `records` (
 --
 -- 转储表的索引
 --
+
+--
+-- 表的索引 `join_list`
+--
+ALTER TABLE `join_list`
+  ADD PRIMARY KEY (`uid`);
 
 --
 -- 表的索引 `records`
